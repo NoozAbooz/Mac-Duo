@@ -98,6 +98,7 @@ final class DepthOverlay {
     /// alive past the fade, so a new run has to take it down itself.
     private var fadingWindow: OverlayWindow?
     private var presenceWindow: OverlayWindow?
+    private var presenceRequests = 0
     /// Built once and kept.
     private var renderer: DepthRenderer?
     private var hasTriedToBuildRenderer = false
@@ -122,8 +123,21 @@ final class DepthOverlay {
             hasTriedToBuildRenderer = true
             renderer = DepthRenderer()
         }
-        keepPresence()
         return renderer != nil
+    }
+
+    func beginCapturePresence() {
+        presenceRequests += 1
+        keepPresence()
+    }
+
+    func endCapturePresence() {
+        guard presenceRequests > 0 else { return }
+        presenceRequests -= 1
+        guard presenceRequests == 0 else { return }
+        presenceWindow?.orderOut(nil)
+        presenceWindow?.close()
+        presenceWindow = nil
     }
 
     /// A window one point across that shows nothing.
@@ -334,6 +348,7 @@ final class DepthOverlay {
     func dispose() {
         dismiss(animated: false)
         discardLive()
+        presenceRequests = 0
         presenceWindow?.orderOut(nil)
         presenceWindow?.close()
         presenceWindow = nil

@@ -19,8 +19,9 @@ final class DepthRenderer {
         var column0: SIMD4<Float>
         var column1: SIMD4<Float>
         var column2: SIMD4<Float>
-        var blur: SIMD4<Float>
-        var height: SIMD4<Float>
+        var screenAndOrigin: SIMD4<Float>
+        var paddedAndBlur: SIMD4<Float>
+        var shape: SIMD4<Float>
         var light: SIMD4<Float>
     }
 
@@ -50,6 +51,7 @@ final class DepthRenderer {
     private var paddedOrigin: CGPoint = .zero
     private var paddedSize: CGSize = .zero
     private var maxLevel: Float = 0
+    private var outputScale: CGFloat = 0
     /// Corner radius (points) the cover is rounded to, in screen space. The
     /// fragment shader paints the corner pixels black, the same colour as the
     /// margin, so the folded picture follows the display's physical corners.
@@ -259,6 +261,7 @@ final class DepthRenderer {
             width: screenSize.width * pixelScale,
             height: screenSize.height * pixelScale
         )
+        outputScale = pixelScale
         return true
     }
 
@@ -398,6 +401,7 @@ final class DepthRenderer {
             width: picture.screenSize.width * picture.pixelScale,
             height: picture.screenSize.height * picture.pixelScale
         )
+        outputScale = picture.pixelScale
     }
 
     func release() {
@@ -428,39 +432,26 @@ final class DepthRenderer {
             height: Double(screenSize.height),
             to: corners.map { SIMD2(Double($0.x), Double($0.y)) }
         )
-        let transform = DepthTextureTransform(
-            screenToPicture: forward.inverse,
-            screenSize: screenSize,
-            pixelScale: pixelScale,
-            paddedOrigin: paddedOrigin,
-            paddedSize: paddedSize
-        )
+        let inverse = forward.inverse
 
         func column(_ index: Int) -> SIMD4<Float> {
-            let c = transform.matrix[index]
+            let c = inverse[index]
             return SIMD4(Float(c.x), Float(c.y), Float(c.z), 0)
         }
-        // The response is uniform, so calculate it once instead of per pixel.
-        let radiusScale = powf(max(Float(blurStrength), 0), 1.2)
-            * Float(maxBlurRadius * Double(pixelScale))
-        let hingeRadius = radiusScale * Float(hingeFloor)
+        updateOutputScale(for: blurStrength)
         var uniforms = Uniforms(
             column0: column(0),
             column1: column(1),
             column2: column(2),
-            blur: SIMD4(
-                hingeRadius,
-                radiusScale * (1 - Float(hingeFloor)),
-                maxLevel,
-                0
+            screenAndOrigin: SIMD4(
+                Float(screenSize.width), Float(screenSize.height),
+                Float(paddedOrigin.x), Float(paddedOrigin.y)
             ),
-            height: SIMD4(
-                Float(transform.heightOffset),
-                Float(transform.heightScale),
-                0,
-                0
+            paddedAndBlur: SIMD4(
+                Float(paddedSize.width), Float(paddedSize.height),
+                Float(maxBlurRadius * Double(pixelScale)), Float(blurStrength)
             ),
-            shape: SIMD4(Float(hingeFloor), Float(maxDim), Float(pixelScale), maxLevel),
+            shape: SIMD4(Float(hingeFloor), Float(maxDim), Float(outputScale), maxLevel),
             light: SIMD4(Float(dimHingeFloor), Float(dimStrength), Float(dimReach), Float(cornerRadius))
         )
         guard let drawable = layer.nextDrawable() else {
@@ -485,5 +476,22 @@ final class DepthRenderer {
         encoder.endEncoding()
         commands.present(drawable)
         commands.commit()
+    }
+
+    /// Retina resolution is useful while the desktop is sharp. Once the blur
+    /// is strong, rendering at one pixel per point cuts the fragment workload
+    /// to one quarter on a 2x display without a visible loss of detail.
+    private func updateOutputScale(for blurStrength: Double) {
+        let desired = CGFloat(RenderScalePolicy.outputScale(
+            nativeScale: Double(pixelScale),
+            currentScale: Double(outputScale),
+            blurStrength: blurStrength
+        ))
+        guard desired != outputScale else { return }
+        outputScale = desired
+        layer.drawableSize = CGSize(
+            width: screenSize.width * desired,
+            height: screenSize.height * desired
+        )
     }
 }

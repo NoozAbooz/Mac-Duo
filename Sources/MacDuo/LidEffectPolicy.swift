@@ -33,6 +33,25 @@ struct LidPollingPolicy {
     }
 }
 
+/// Chooses the render density with hysteresis so a lid resting on a threshold
+/// does not repeatedly resize the Metal drawable.
+struct RenderScalePolicy {
+    static let reduceAtBlurStrength = 0.4
+    static let restoreAtBlurStrength = 0.25
+
+    static func outputScale(
+        nativeScale: Double,
+        currentScale: Double,
+        blurStrength: Double
+    ) -> Double {
+        let native = max(nativeScale, 1)
+        let current = currentScale > 0 ? currentScale : native
+        if current > 1, blurStrength >= reduceAtBlurStrength { return 1 }
+        if current <= 1, blurStrength <= restoreAtBlurStrength { return native }
+        return current
+    }
+}
+
 struct LidMotionIntent {
     private(set) var lastMovedDownTime: TimeInterval = -Double.greatestFiniteMagnitude
 

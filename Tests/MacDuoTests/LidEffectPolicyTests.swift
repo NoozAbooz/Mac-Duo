@@ -209,3 +209,35 @@ struct LidPollingPolicyTests {
         )
     }
 }
+
+struct RenderScalePolicyTests {
+    @Test
+    func testStrongBlurReducesRetinaOutputToOnePixelPerPoint() {
+        #expect(scale(native: 2, current: 2, blur: 0.39) == 2)
+        #expect(scale(native: 2, current: 2, blur: 0.4) == 1)
+    }
+
+    @Test
+    func testHysteresisKeepsReducedOutputUntilBlurIsNearlyGone() {
+        #expect(scale(native: 2, current: 1, blur: 0.3) == 1)
+        #expect(scale(native: 2, current: 1, blur: 0.25) == 2)
+    }
+
+    @Test
+    func testOneTimesDisplayScaleNeverChanges() {
+        #expect(scale(native: 1, current: 1, blur: 1) == 1)
+    }
+
+    @Test
+    func testUnsetCurrentScaleStartsAtNativeScale() {
+        #expect(scale(native: 2, current: 0, blur: 0) == 2)
+    }
+
+    private func scale(native: Double, current: Double, blur: Double) -> Double {
+        RenderScalePolicy.outputScale(
+            nativeScale: native,
+            currentScale: current,
+            blurStrength: blur
+        )
+    }
+}

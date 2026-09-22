@@ -99,8 +99,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         popover.show(relativeTo: .zero, of: button, preferredEdge: .minY)
     }
 
+    func popoverWillShow(_ notification: Notification) {
+        controller.setAngleUpdatesRequested(true, for: .settings)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        controller.setAngleUpdatesRequested(false, for: .settings)
+    }
+
     private func configureAngleTitle(isVisible: Bool) {
         angleSubscription = nil
+        controller.setAngleUpdatesRequested(isVisible, for: .menuBar)
         guard let button = statusItem.button else { return }
         guard isVisible else {
             button.title = ""

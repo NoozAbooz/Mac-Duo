@@ -11,6 +11,11 @@ import QuartzCore
 @MainActor
 final class LidController: ObservableObject {
 
+    enum AngleUpdateConsumer: Hashable {
+        case menuBar
+        case settings
+    }
+
     @Published private(set) var currentAngle: Double = 0
     @Published private(set) var isSensorAvailable = false
     @Published private(set) var isActive = false
@@ -39,7 +44,15 @@ final class LidController: ObservableObject {
     private var consecutiveFailedReads = 0
     private var startedAt: CFTimeInterval = 0
     private var preview: PreviewRun?
-    private var isSuspended = false
+    private enum SuspensionReason: Hashable {
+        case systemSleep
+        case screenSleep
+        case inactiveSession
+        case screenLock
+    }
+    private var suspensionReasons: Set<SuspensionReason> = []
+    private var isSuspended: Bool { !suspensionReasons.isEmpty }
+    private var angleUpdateConsumers: Set<AngleUpdateConsumer> = []
     private var motionIntent = LidMotionIntent()
     private var openDwell = LidOpenDwell()
     /// Where the lid last moved to by more than `timeoutMovementThreshold`,
@@ -67,7 +80,9 @@ final class LidController: ObservableObject {
 
     private static let deepIdlePollInterval: TimeInterval = 1.0 / 4
     private static let idlePollInterval: TimeInterval = 1.0 / 8
-    private static let activePollInterval: TimeInterval = 1.0 / 30
+    /// The HID value itself refreshes at about 10 Hz. Sampling at 15 Hz keeps
+    /// detection responsive without reading the same report three times.
+    private static let activePollInterval: TimeInterval = 1.0 / 15
     private static let fadeInDuration: TimeInterval = 0.07
     private static let observedMovementThreshold: Double = 0.2
     private static let prewarmNearThreshold: Double = 15
@@ -181,6 +196,16 @@ final class LidController: ObservableObject {
         pollTimer = nil
         pollInterval = 0
         stopEffectAndCapture()
+    }
+
+    func setAngleUpdatesRequested(_ requested: Bool, for consumer: AngleUpdateConsumer) {
+        if requested {
+            angleUpdateConsumers.insert(consumer)
+            lastPublishTime = 0
+            publish(angle: rawAngle, force: true)
+        } else {
+            angleUpdateConsumers.remove(consumer)
+        }
     }
 
     private func stopEffectAndCapture() {
@@ -472,9 +497,10 @@ final class LidController: ObservableObject {
         return rawAngle + angularVelocity * (staleness + Self.predictionLatency)
     }
 
-    private func publish(angle: Double) {
+    private func publish(angle: Double, force: Bool = false) {
+        guard !angleUpdateConsumers.isEmpty else { return }
         let now = CACurrentMediaTime()
-        guard now - lastPublishTime > 0.08 else { return }
+        guard force || now - lastPublishTime > 0.08 else { return }
         lastPublishTime = now
         if abs(currentAngle - angle) > 0.001 { currentAngle = angle }
     }
@@ -658,10 +684,22 @@ final class LidController: ObservableObject {
     private func observeSystemEvents() {
         let workspace = NSWorkspace.shared.notificationCenter
         workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.suspend() }
+            MainActor.assumeIsolated { self?.suspend(for: .systemSleep) }
         }
         workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.resume() }
+            MainActor.assumeIsolated { self?.resume(from: .systemSleep) }
+        }
+        workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.suspend(for: .screenSleep) }
+        }
+        workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.resume(from: .screenSleep) }
+        }
+        workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.suspend(for: .inactiveSession) }
+        }
+        workspace.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.resume(from: .inactiveSession) }
         }
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -671,6 +709,22 @@ final class LidController: ObservableObject {
             MainActor.assumeIsolated {
                 self?.refreshDisplays()
             }
+        }
+
+        let distributed = DistributedNotificationCenter.default()
+        distributed.addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.suspend(for: .screenLock) }
+        }
+        distributed.addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.resume(from: .screenLock) }
         }
     }
 
@@ -692,18 +746,21 @@ final class LidController: ObservableObject {
         }
     }
 
-    private func suspend() {
-        Diagnostics.lid.notice("suspend")
-        isSuspended = true
+    private func suspend(for reason: SuspensionReason) {
+        let wasActive = isSuspended
+        suspensionReasons.insert(reason)
+        guard !wasActive else { return }
+        Diagnostics.lid.notice("suspend: \(String(describing: reason), privacy: .public)")
         pollTimer?.invalidate()
         pollTimer = nil
         pollInterval = 0
         stopEffectAndCapture()
     }
 
-    private func resume() {
-        Diagnostics.lid.notice("resume")
-        isSuspended = false
+    private func resume(from reason: SuspensionReason) {
+        guard suspensionReasons.remove(reason) != nil else { return }
+        guard !isSuspended else { return }
+        Diagnostics.lid.notice("resume: \(String(describing: reason), privacy: .public)")
         // A fresh baseline, so waking with a nearly shut lid does not read as
         // closing movement.
         lastChangedAngle = nil
