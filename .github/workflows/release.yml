@@ -61,6 +61,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate signing secrets
+        id: signing_secrets
         env:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -69,11 +70,18 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          missing=()
           for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_TEAM_ID \
             APPLE_NOTARY_KEY_P8_BASE64 APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID; do
-            [[ -n "${!name}" ]] || { echo "::error::Missing secret: $name"; exit 1; }
+            [[ -n "${!name}" ]] || missing+=("$name")
           done
+          if [[ "${#missing[@]}" -eq 0 ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping signed release because required secrets are missing: ${missing[*]}"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build universal app
         run: |
@@ -82,6 +90,7 @@ jobs:
           lipo "$APP_PATH/Contents/MacOS/MacDuo" -verify_arch arm64 x86_64
 
       - name: Install Developer ID credentials
+        if: steps.signing_secrets.outputs.available == 'true'
         env:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -121,6 +130,7 @@ jobs:
           echo "SIGNING_IDENTITY=$IDENTITIES" >> "$GITHUB_ENV"
 
       - name: Sign release app
+        if: steps.signing_secrets.outputs.available == 'true'
         env:
           APP_VERSION: ${{ steps.meta.outputs.version }}
           BUILD_VERSION: ${{ steps.meta.outputs.build }}
@@ -140,6 +150,7 @@ jobs:
           printf '%s\n' "$INFO" | grep -q 'flags=.*runtime'
 
       - name: Package signed DMG
+        if: steps.signing_secrets.outputs.available == 'true'
         env:
           DMG_NAME: ${{ steps.meta.outputs.dmg }}
         run: |
@@ -157,6 +168,7 @@ jobs:
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
 
       - name: Notarize DMG
+        if: steps.signing_secrets.outputs.available == 'true'
         env:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
@@ -182,6 +194,7 @@ jobs:
           fi
 
       - name: Staple tickets and package ZIP
+        if: steps.signing_secrets.outputs.available == 'true'
         env:
           ZIP_NAME: ${{ steps.meta.outputs.zip }}
         run: |
@@ -197,6 +210,28 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
           echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
 
+      - name: Package unsigned artifacts
+        if: steps.signing_secrets.outputs.available != 'true'
+        env:
+          DMG_NAME: ${{ steps.meta.outputs.dmg }}
+          ZIP_NAME: ${{ steps.meta.outputs.zip }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIST_PATH"
+          STAGING="$(mktemp -d "$RUNNER_TEMP/dmg-staging.XXXXXX")"
+          trap 'rm -rf "$STAGING"' EXIT
+          ditto "$APP_PATH" "$STAGING/Mac Duo.app"
+          ln -s /Applications "$STAGING/Applications"
+          DMG_PATH="$DIST_PATH/$DMG_NAME"
+          hdiutil create -volname 'Mac Duo' -srcfolder "$STAGING" \
+            -fs HFS+ -format UDZO "$DMG_PATH"
+          ZIP_PATH="$DIST_PATH/$ZIP_NAME"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
+          {
+            echo "DMG_PATH=$DMG_PATH"
+            echo "ZIP_PATH=$ZIP_PATH"
+          } >> "$GITHUB_ENV"
+
       - name: Remove signing credentials
         if: always()
         run: |
@@ -210,7 +245,7 @@ jobs:
           exit "$CLEANUP_STATUS"
 
       - name: Upload notarization diagnostics
-        if: failure()
+        if: failure() && steps.signing_secrets.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: notarization-${{ github.run_id }}-${{ github.run_attempt }}
@@ -242,6 +277,7 @@ jobs:
           } > "$DIST_PATH/NOTES.md"
 
       - name: Publish development build
+        if: steps.signing_secrets.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
