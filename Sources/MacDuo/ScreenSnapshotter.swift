@@ -39,31 +39,26 @@ final class ScreenSnapshotter {
 
     private var filter: SCContentFilter?
     private var filterDisplayID: CGDirectDisplayID?
-    private var timer: Timer?
     private var inFlight: Task<Void, Never>?
+    private var capturePending = false
     private var lastLoggedGeometry: String?
-
-    var isPrewarming: Bool { timer != nil }
 
     var hasPermission: Bool { CGPreflightScreenCaptureAccess() }
 
-    func beginPrewarm(interval: TimeInterval = 0.2) {
-        guard timer == nil else { return }
-        capture()
-        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.capture() }
+    /// Requests a current frame without leaving a repeating capture timer
+    /// behind. If a capture is already running, one final refresh is queued.
+    func requestPrewarmCapture() {
+        if inFlight != nil {
+            capturePending = true
+        } else {
+            capture()
         }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
     }
 
-    func endPrewarm() {
-        timer?.invalidate()
-        timer = nil
-    }
+    func endPrewarm() {}
 
     func stop() {
-        endPrewarm()
+        capturePending = false
         inFlight?.cancel()
         inFlight = nil
         discard()
@@ -99,6 +94,10 @@ final class ScreenSnapshotter {
             await self?.performCapture()
             guard !Task.isCancelled else { return }
             self?.inFlight = nil
+            if self?.capturePending == true {
+                self?.capturePending = false
+                self?.capture()
+            }
         }
         inFlight = task
         return task

@@ -26,6 +26,8 @@ final class LidController: ObservableObject {
     private var displayLink: CADisplayLink?
     private var lastFrameTime: CFTimeInterval = 0
     private var lastPublishTime: CFTimeInterval = 0
+    private var lastObservedAngle: Double?
+    private var lastObservedMovementTime: CFTimeInterval = 0
 
     private var rawAngle: Double = 0
     /// Degrees per second, negative while the lid closes.
@@ -58,12 +60,19 @@ final class LidController: ObservableObject {
     /// once the lid has risen `LidEffectPolicy.minimumReleaseRise` above it.
     private var lowestRunAngle: Double = 0
     private var displayLayouts: [DisplayLayout] = []
+    private var prewarmCaptureAngle: Double?
+    private var lastAppliedVisualAngle: Double?
+    private var lastAppliedProgress: Double?
+    private var lastAppliedTuning: DepthTuning?
 
+    private static let deepIdlePollInterval: TimeInterval = 1.0 / 4
     private static let idlePollInterval: TimeInterval = 1.0 / 8
     private static let activePollInterval: TimeInterval = 1.0 / 30
     private static let fadeInDuration: TimeInterval = 0.07
-    /// Degrees above the pre-warm zone at which polling speeds up.
-    private static let fastPollMargin: Double = 20
+    private static let observedMovementThreshold: Double = 0.2
+    private static let prewarmNearThreshold: Double = 15
+    private static let animationAngleEpsilon: Double = 0.02
+    private static let animationVelocityEpsilon: Double = 0.05
 
     /// Closing speed that counts as a deliberate close, in degrees per second.
     /// A still lid reads under 0.5.
@@ -151,7 +160,9 @@ final class LidController: ObservableObject {
             rawAngle = angle
             currentAngle = angle
             visualAngle.reset(to: angle)
+            lastObservedAngle = angle
         }
+        lastObservedMovementTime = CACurrentMediaTime()
         // Establish the selected displays before the first sensor poll.
         refreshDisplays()
         setPollInterval(Self.idlePollInterval)
@@ -178,6 +189,8 @@ final class LidController: ObservableObject {
         for effect in effects { effect.dismiss(animated: false) }
         preview = nil
         isActive = false
+        prewarmCaptureAngle = nil
+        resetAppliedVisualState()
     }
 
     private func disableEffect() {
@@ -215,6 +228,11 @@ final class LidController: ObservableObject {
         pollTimer?.invalidate()
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
+        }
+        if interval == Self.deepIdlePollInterval {
+            timer.tolerance = interval * 0.2
+        } else if interval == Self.idlePollInterval {
+            timer.tolerance = interval * 0.1
         }
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
@@ -255,6 +273,12 @@ final class LidController: ObservableObject {
             angle = read
         }
 
+        let now = CACurrentMediaTime()
+        if let previous = lastObservedAngle,
+           abs(angle - previous) >= Self.observedMovementThreshold {
+            lastObservedMovementTime = now
+        }
+        lastObservedAngle = angle
         rawAngle = angle
         peakAngle = max(peakAngle, angle)
         if isActive { lowestRunAngle = min(lowestRunAngle, angle) }
@@ -262,14 +286,30 @@ final class LidController: ObservableObject {
 
         if preferences.isEnabled {
             updateVelocity(with: angle)
-            openDwell.update(angle: angle, at: CACurrentMediaTime(), dwellAngle: effectPolicy.dwellAngle)
+            openDwell.update(angle: angle, at: now, dwellAngle: effectPolicy.dwellAngle)
             reconcile(angle: angle)
         }
 
-        let prewarmZone = preferences.thresholdAngle + preferences.prewarmCeiling
-        let wantsFastPolling = preferences.isEnabled
-            && (preview != nil || isActive || angle <= prewarmZone + Self.fastPollMargin)
-        setPollInterval(wantsFastPolling ? Self.activePollInterval : Self.idlePollInterval)
+        updatePollingInterval(angle: angle, now: now)
+    }
+
+    private func updatePollingInterval(angle: Double, now: CFTimeInterval) {
+        let mode = LidPollingPolicy.mode(
+            isActive: isActive,
+            isPreviewing: preview != nil,
+            isClosingOut: isClosingOut,
+            angle: angle,
+            threshold: preferences.thresholdAngle,
+            timeSinceMovement: max(now - lastObservedMovementTime, 0)
+        )
+        switch mode {
+        case .deepIdle:
+            setPollInterval(Self.deepIdlePollInterval)
+        case .idle:
+            setPollInterval(Self.idlePollInterval)
+        case .active:
+            setPollInterval(Self.activePollInterval)
+        }
     }
 
     private var effectPolicy: LidEffectPolicy {
@@ -395,11 +435,31 @@ final class LidController: ObservableObject {
     /// a capture loop running.
     private func updatePrewarm(angle: Double, ceiling: Double) {
         let closingRecently = CACurrentMediaTime() - lastClosingTime < preferences.prewarmLinger
+        let isNeeded = angle <= ceiling && closingRecently
+        guard isNeeded else {
+            prewarmCaptureAngle = nil
+            for effect in effects {
+                effect.prewarm(isLive: preferences.isLivePicture, isNeeded: false, captureNow: false)
+            }
+            return
+        }
+
+        let nearThreshold = preferences.thresholdAngle + Self.prewarmNearThreshold
+        let captureNow: Bool
+        if preferences.isLivePicture {
+            captureNow = false
+        } else if let capturedAt = prewarmCaptureAngle {
+            captureNow = capturedAt > nearThreshold && angle <= nearThreshold
+        } else {
+            captureNow = true
+        }
+        if captureNow { prewarmCaptureAngle = angle }
+
         for effect in effects {
             effect.prewarm(
                 isLive: preferences.isLivePicture,
-                shouldCapture: angle <= ceiling && closingRecently,
-                interval: preferences.prewarmInterval
+                isNeeded: true,
+                captureNow: captureNow
             )
         }
     }
@@ -424,6 +484,8 @@ final class LidController: ObservableObject {
     private func setActive(_ active: Bool) {
         isActive = active
         if active {
+            prewarmCaptureAngle = nil
+            resetAppliedVisualState()
             peakAngle = rawAngle
             lowestRunAngle = rawAngle
             openDwell.reset()
@@ -447,9 +509,15 @@ final class LidController: ObservableObject {
     /// the effect with the lid still shut would otherwise fade out a warped
     /// picture. `step(_:)` drives the ease and calls `finishClosingOut()`.
     private func beginClosingOut() {
-        // Nothing to ease before the picture is up, or with no link to draw it.
-        guard effects.contains(where: { $0.isVisible }), displayLink != nil else {
+        // A stationary still picture may have stopped its display link. Start
+        // it again so the exit can ease back to the unwarped desktop.
+        guard effects.contains(where: { $0.isVisible }) else {
             stopDisplayLink()
+            for effect in effects { effect.dismiss(animated: true) }
+            return
+        }
+        if displayLink == nil { startDisplayLink() }
+        guard displayLink != nil else {
             for effect in effects { effect.dismiss(animated: true) }
             return
         }
@@ -477,7 +545,7 @@ final class LidController: ObservableObject {
                 fadeIn: Self.fadeInDuration
             )
         }
-        if displayLink == nil { startDisplayLink() }
+        if displayLink == nil, needsDisplayLink { startDisplayLink() }
     }
 
     private func blurProgress(for angle: Double) -> Double {
@@ -495,6 +563,11 @@ final class LidController: ObservableObject {
         }
         Diagnostics.lid.notice("display link started")
         let link = window.displayLink(target: self, selector: #selector(step(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(
+            minimum: 15,
+            maximum: 30,
+            preferred: 30
+        )
         link.add(to: .main, forMode: .common)
         lastFrameTime = CACurrentMediaTime()
         displayLink = link
@@ -515,6 +588,14 @@ final class LidController: ObservableObject {
 
         guard isClosingOut else {
             applyVisual(angle: visualAngle.value)
+            if !preferences.isLivePicture,
+               abs(visualAngle.value - rawAngle) <= Self.animationAngleEpsilon,
+               abs(visualAngle.velocity) <= Self.animationVelocityEpsilon,
+               !effects.contains(where: { $0.needsInitialRender }) {
+                visualAngle.reset(to: rawAngle)
+                applyVisual(angle: rawAngle)
+                stopDisplayLink()
+            }
             return
         }
         // At or above the threshold the picture is already flat, so a lid
@@ -535,9 +616,30 @@ final class LidController: ObservableObject {
     /// The geometry takes the lid angle itself, so only the blur saturates.
     private func applyVisual(angle: Double) {
         let progress = blurProgress(for: angle)
+        let currentTuning = tuning
         for effect in effects {
-            effect.update(progress: progress, angle: angle, tuning: tuning)
+            effect.update(progress: progress, angle: angle, tuning: currentTuning)
         }
+        lastAppliedVisualAngle = angle
+        lastAppliedProgress = progress
+        lastAppliedTuning = currentTuning
+    }
+
+    private var needsDisplayLink: Bool {
+        if preferences.isLivePicture || isClosingOut { return true }
+        if effects.contains(where: { $0.needsInitialRender }) { return true }
+        guard let lastAppliedVisualAngle, let lastAppliedProgress, let lastAppliedTuning else {
+            return true
+        }
+        return abs(lastAppliedVisualAngle - rawAngle) > Self.animationAngleEpsilon
+            || abs(lastAppliedProgress - blurProgress(for: rawAngle)) > 0.001
+            || lastAppliedTuning != tuning
+    }
+
+    private func resetAppliedVisualState() {
+        lastAppliedVisualAngle = nil
+        lastAppliedProgress = nil
+        lastAppliedTuning = nil
     }
 
     private var tuning: DepthTuning {
@@ -593,6 +695,9 @@ final class LidController: ObservableObject {
     private func suspend() {
         Diagnostics.lid.notice("suspend")
         isSuspended = true
+        pollTimer?.invalidate()
+        pollTimer = nil
+        pollInterval = 0
         stopEffectAndCapture()
     }
 
@@ -614,7 +719,9 @@ final class LidController: ObservableObject {
         if let angle = sensor.angle() {
             rawAngle = angle
             visualAngle.reset(to: angle)
+            lastObservedAngle = angle
         }
+        lastObservedMovementTime = CACurrentMediaTime()
         setPollInterval(Self.idlePollInterval)
     }
 }

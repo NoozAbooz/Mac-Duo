@@ -12,9 +12,11 @@ final class DisplayEffect {
     private var warmTask: Task<Void, Never>?
     private var isPresenting = false
     private var usesLivePicture = false
+    private var hasRenderedFrame = false
 
     var hostWindow: NSWindow? { overlay.hostWindow }
     var isVisible: Bool { overlay.isVisible }
+    var needsInitialRender: Bool { overlay.isVisible && overlay.isPictureReady && !hasRenderedFrame }
 
     init(screen: NSScreen, displayID: CGDirectDisplayID) {
         self.screen = screen
@@ -38,8 +40,8 @@ final class DisplayEffect {
         }
     }
 
-    func prewarm(isLive: Bool, shouldCapture: Bool, interval: TimeInterval) {
-        guard shouldCapture else {
+    func prewarm(isLive: Bool, isNeeded: Bool, captureNow: Bool) {
+        guard isNeeded else {
             snapshotter.stop()
             streamer.stop()
             overlay.discardLive()
@@ -52,7 +54,7 @@ final class DisplayEffect {
         } else {
             streamer.stop()
             overlay.discardLive()
-            snapshotter.beginPrewarm(interval: interval)
+            if captureNow { snapshotter.requestPrewarmCapture() }
         }
     }
 
@@ -65,6 +67,7 @@ final class DisplayEffect {
         }
         guard pictureTask == nil else { return }
         usesLivePicture = false
+        hasRenderedFrame = false
 
         if isLive, overlay.showLive(on: screen, startAngle: startAngle, tuning: tuning, fadeIn: fadeIn) {
             usesLivePicture = true
@@ -103,6 +106,7 @@ final class DisplayEffect {
     func update(progress: Double, angle: Double, tuning: DepthTuning) {
         if let frame = streamer.newFrame() { overlay.absorb(frame) }
         overlay.update(progress: progress, currentAngle: angle, tuning: tuning)
+        if overlay.isPictureReady { hasRenderedFrame = true }
     }
 
     /// Prevent late screenshots from showing a new window during the exit
@@ -121,6 +125,7 @@ final class DisplayEffect {
         streamer.stop()
         overlay.dismiss(animated: animated)
         overlay.discardLive()
+        hasRenderedFrame = false
     }
 
     /// Also release the invisible presence window when removing a display.

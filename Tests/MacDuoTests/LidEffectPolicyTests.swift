@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import MacDuo
 
@@ -160,6 +161,51 @@ struct LidEffectPolicyTests {
             isClearlyOpening: opening,
             hasDwelledOpen: dwelled,
             minimumDurationElapsed: minimumDurationElapsed
+        )
+    }
+}
+
+struct LidPollingPolicyTests {
+    @Test
+    func testMovingLidUsesActivePolling() {
+        #expect(mode(angle: 130, stillFor: 0.2) == .active)
+    }
+
+    @Test
+    func testSafelyOpenStationaryLidUsesDeepIdlePolling() {
+        #expect(mode(angle: 121, stillFor: 2) == .deepIdle)
+    }
+
+    @Test
+    func testLidNearTriggerUsesIdlePolling() {
+        #expect(mode(angle: 110, stillFor: 10) == .idle)
+    }
+
+    @Test
+    func testActiveEffectNeverUsesDeepIdlePolling() {
+        #expect(mode(isActive: true, angle: 60, stillFor: 10) == .idle)
+    }
+
+    @Test
+    func testPreviewAndClosingOutUseActivePolling() {
+        #expect(mode(isPreviewing: true, angle: 130, stillFor: 10) == .active)
+        #expect(mode(isClosingOut: true, angle: 130, stillFor: 10) == .active)
+    }
+
+    private func mode(
+        isActive: Bool = false,
+        isPreviewing: Bool = false,
+        isClosingOut: Bool = false,
+        angle: Double,
+        stillFor: TimeInterval
+    ) -> LidPollingMode {
+        LidPollingPolicy.mode(
+            isActive: isActive,
+            isPreviewing: isPreviewing,
+            isClosingOut: isClosingOut,
+            angle: angle,
+            threshold: 90,
+            timeSinceMovement: stillFor
         )
     }
 }

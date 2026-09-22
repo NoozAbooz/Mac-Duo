@@ -56,7 +56,7 @@ struct DepthGeometry {
 }
 
 /// The settings that shape one frame.
-struct DepthTuning {
+struct DepthTuning: Equatable {
     var viewingDistance: Double = 2.7
     var recession: Double = 2
     var blurEvenness: Double = 0.4

@@ -1,5 +1,38 @@
 import Foundation
 
+enum LidPollingMode: Equatable {
+    case deepIdle
+    case idle
+    case active
+}
+
+/// Selects the least expensive sensor rate that still leaves enough angle
+/// between the current position and the trigger to detect a quick close.
+struct LidPollingPolicy {
+    static let activeMemory: TimeInterval = 0.5
+    static let deepIdleDelay: TimeInterval = 2
+    static let deepIdleMargin: Double = 30
+
+    static func mode(
+        isActive: Bool,
+        isPreviewing: Bool,
+        isClosingOut: Bool,
+        angle: Double,
+        threshold: Double,
+        timeSinceMovement: TimeInterval
+    ) -> LidPollingMode {
+        if isPreviewing || isClosingOut || timeSinceMovement < activeMemory {
+            return .active
+        }
+        if !isActive,
+           timeSinceMovement >= deepIdleDelay,
+           angle > threshold + deepIdleMargin {
+            return .deepIdle
+        }
+        return .idle
+    }
+}
+
 struct LidMotionIntent {
     private(set) var lastMovedDownTime: TimeInterval = -Double.greatestFiniteMagnitude
 

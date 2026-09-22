@@ -86,7 +86,8 @@ final class ScreenStreamer {
 
     /// Frames are handed over no faster than this. A starting stream delivers
     /// a burst well above its asked for rate.
-    private static let minimumHandOverInterval: TimeInterval = 1.0 / 32
+    private static let framesPerSecond: Int32 = 24
+    private static let minimumHandOverInterval: TimeInterval = 1.0 / 25
 
     private(set) var isStarted = false
     private(set) var screen: NSScreen?
@@ -167,18 +168,18 @@ final class ScreenStreamer {
             let configuration = SCStreamConfiguration()
             configuration.width = Int(activeFilter.contentRect.width * CGFloat(activeFilter.pointPixelScale))
             configuration.height = Int(activeFilter.contentRect.height * CGFloat(activeFilter.pointPixelScale))
-            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: Self.framesPerSecond)
             configuration.pixelFormat = kCVPixelFormatType_32BGRA
             configuration.colorSpaceName = Self.colourSpaceName
             configuration.showsCursor = false
-            configuration.queueDepth = 5
+            configuration.queueDepth = 3
             configuration.scalesToFit = false
 
             let fresh = SCStream(filter: activeFilter, configuration: configuration, delegate: nil)
             try fresh.addStreamOutput(
                 receiver,
                 type: .screen,
-                sampleHandlerQueue: DispatchQueue(label: "MacDuo.frames", qos: .userInteractive)
+                sampleHandlerQueue: DispatchQueue(label: "MacDuo.frames", qos: .userInitiated)
             )
             let started = CFAbsoluteTimeGetCurrent()
             try await fresh.startCapture()
