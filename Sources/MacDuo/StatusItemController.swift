@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// The menu bar item and the settings popover.
@@ -9,7 +10,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
     private let preferences: Preferences
     private let controller: LidController
-    private var titleTimer: Timer?
+    private var showsAngleSubscription: AnyCancellable?
+    private var angleSubscription: AnyCancellable?
     private var barWindowMoved: NSObjectProtocol?
 
     init(controller: LidController, preferences: Preferences) {
@@ -43,17 +45,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         hostingController.sizingOptions = [.preferredContentSize]
         popover.contentViewController = hostingController
 
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshTitle() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        titleTimer = timer
-        refreshTitle()
+        showsAngleSubscription = preferences.$showsAngleInMenuBar
+            .removeDuplicates()
+            .sink { [weak self] showsAngle in
+                self?.configureAngleTitle(isVisible: showsAngle)
+            }
         watchBarWindow()
     }
 
     deinit {
-        titleTimer?.invalidate()
         if let barWindowMoved {
             NotificationCenter.default.removeObserver(barWindowMoved)
         }
@@ -99,12 +99,27 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         popover.show(relativeTo: .zero, of: button, preferredEdge: .minY)
     }
 
-    private func refreshTitle() {
+    func popoverWillShow(_ notification: Notification) {
+        controller.setAngleUpdatesRequested(true, for: .settings)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        controller.setAngleUpdatesRequested(false, for: .settings)
+    }
+
+    private func configureAngleTitle(isVisible: Bool) {
+        angleSubscription = nil
+        controller.setAngleUpdatesRequested(isVisible, for: .menuBar)
         guard let button = statusItem.button else { return }
-        if preferences.showsAngleInMenuBar {
-            button.title = String(format: " %.0f°", controller.currentAngle)
-        } else if !button.title.isEmpty {
+        guard isVisible else {
             button.title = ""
+            return
         }
+
+        angleSubscription = controller.$currentAngle
+            .removeDuplicates { round($0) == round($1) }
+            .sink { [weak self] angle in
+                self?.statusItem.button?.title = String(format: " %.0f°", angle)
+            }
     }
 }

@@ -1,5 +1,57 @@
 import Foundation
 
+enum LidPollingMode: Equatable {
+    case deepIdle
+    case idle
+    case active
+}
+
+/// Selects the least expensive sensor rate that still leaves enough angle
+/// between the current position and the trigger to detect a quick close.
+struct LidPollingPolicy {
+    static let activeMemory: TimeInterval = 0.5
+    static let deepIdleDelay: TimeInterval = 2
+    static let deepIdleMargin: Double = 30
+
+    static func mode(
+        isActive: Bool,
+        isPreviewing: Bool,
+        isClosingOut: Bool,
+        angle: Double,
+        threshold: Double,
+        timeSinceMovement: TimeInterval
+    ) -> LidPollingMode {
+        if isPreviewing || isClosingOut || timeSinceMovement < activeMemory {
+            return .active
+        }
+        if !isActive,
+           timeSinceMovement >= deepIdleDelay,
+           angle > threshold + deepIdleMargin {
+            return .deepIdle
+        }
+        return .idle
+    }
+}
+
+/// Chooses the render density with hysteresis so a lid resting on a threshold
+/// does not repeatedly resize the Metal drawable.
+struct RenderScalePolicy {
+    static let reduceAtBlurStrength = 0.4
+    static let restoreAtBlurStrength = 0.25
+
+    static func outputScale(
+        nativeScale: Double,
+        currentScale: Double,
+        blurStrength: Double
+    ) -> Double {
+        let native = max(nativeScale, 1)
+        let current = currentScale > 0 ? currentScale : native
+        if current > 1, blurStrength >= reduceAtBlurStrength { return 1 }
+        if current <= 1, blurStrength <= restoreAtBlurStrength { return native }
+        return current
+    }
+}
+
 struct LidMotionIntent {
     private(set) var lastMovedDownTime: TimeInterval = -Double.greatestFiniteMagnitude
 

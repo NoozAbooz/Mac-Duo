@@ -127,11 +127,8 @@ final class Preferences: ObservableObject {
     /// Closing speed in degrees per second that starts the pre-warm.
     let closingSpeed: Double = 8
 
-    /// How long the pre-warm runs after the lid stops moving.
-    let prewarmLinger: TimeInterval = 2
-
-    /// Seconds between pre-warm screenshots.
-    let prewarmInterval: TimeInterval = 0.25
+    /// How long capture remains prepared after the lid stops moving.
+    let prewarmLinger: TimeInterval = 0.5
 
     /// Degrees above the threshold before the overlay is released.
     let hysteresis: Double = 4

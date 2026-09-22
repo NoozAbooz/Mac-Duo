@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import MacDuo
 
@@ -160,6 +161,83 @@ struct LidEffectPolicyTests {
             isClearlyOpening: opening,
             hasDwelledOpen: dwelled,
             minimumDurationElapsed: minimumDurationElapsed
+        )
+    }
+}
+
+struct LidPollingPolicyTests {
+    @Test
+    func testMovingLidUsesActivePolling() {
+        #expect(mode(angle: 130, stillFor: 0.2) == .active)
+    }
+
+    @Test
+    func testSafelyOpenStationaryLidUsesDeepIdlePolling() {
+        #expect(mode(angle: 121, stillFor: 2) == .deepIdle)
+    }
+
+    @Test
+    func testLidNearTriggerUsesIdlePolling() {
+        #expect(mode(angle: 110, stillFor: 10) == .idle)
+    }
+
+    @Test
+    func testActiveEffectNeverUsesDeepIdlePolling() {
+        #expect(mode(isActive: true, angle: 60, stillFor: 10) == .idle)
+    }
+
+    @Test
+    func testPreviewAndClosingOutUseActivePolling() {
+        #expect(mode(isPreviewing: true, angle: 130, stillFor: 10) == .active)
+        #expect(mode(isClosingOut: true, angle: 130, stillFor: 10) == .active)
+    }
+
+    private func mode(
+        isActive: Bool = false,
+        isPreviewing: Bool = false,
+        isClosingOut: Bool = false,
+        angle: Double,
+        stillFor: TimeInterval
+    ) -> LidPollingMode {
+        LidPollingPolicy.mode(
+            isActive: isActive,
+            isPreviewing: isPreviewing,
+            isClosingOut: isClosingOut,
+            angle: angle,
+            threshold: 90,
+            timeSinceMovement: stillFor
+        )
+    }
+}
+
+struct RenderScalePolicyTests {
+    @Test
+    func testStrongBlurReducesRetinaOutputToOnePixelPerPoint() {
+        #expect(scale(native: 2, current: 2, blur: 0.39) == 2)
+        #expect(scale(native: 2, current: 2, blur: 0.4) == 1)
+    }
+
+    @Test
+    func testHysteresisKeepsReducedOutputUntilBlurIsNearlyGone() {
+        #expect(scale(native: 2, current: 1, blur: 0.3) == 1)
+        #expect(scale(native: 2, current: 1, blur: 0.25) == 2)
+    }
+
+    @Test
+    func testOneTimesDisplayScaleNeverChanges() {
+        #expect(scale(native: 1, current: 1, blur: 1) == 1)
+    }
+
+    @Test
+    func testUnsetCurrentScaleStartsAtNativeScale() {
+        #expect(scale(native: 2, current: 0, blur: 0) == 2)
+    }
+
+    private func scale(native: Double, current: Double, blur: Double) -> Double {
+        RenderScalePolicy.outputScale(
+            nativeScale: native,
+            currentScale: current,
+            blurStrength: blur
         )
     }
 }
